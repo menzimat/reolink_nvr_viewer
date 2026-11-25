@@ -1,0 +1,60 @@
+# Copy to config.yaml and edit. Keep config.yaml private (chmod 600).
+nvr:
+  host: "192.168.1.100"
+  http_port: 443
+  https: true
+  rtsp_port: 554
+  username: "admin"
+  # KeePassXC database path. The database password is never stored here.
+  keepass_database: "/home/USER/Documents/Passwords.kdbx"
+  keepass_entry: "Reolink NVR"
+  # KeePassXC group path is optional, e.g. "Home/Cameras/Reolink NVR"
+  keepass_group: ""
+  verify_tls: false
+
+video:
+  stream: "sub"             # "sub" recommended for multi-view; "main" for detail
+  frame_width: 640
+  frame_height: 360
+  reconnect_seconds: 3
+  open_timeout_seconds: 8
+  max_fps: 15
+
+gui:
+  title: "Reolink NVR Viewer"
+  geometry: "1400x900+80+60"
+  default_columns: 3
+  pane_min_width: 240
+  pane_min_height: 160
+  layout_file: "~/.config/reolink-nvr-viewer/layout.json"
+  # Optional channel display names keyed by 1-based NVR channel number.
+  channel_names:
+    "1": "Front"
+    "2": "Driveway"
+
+audio:
+  # Two-way talk uses Reolink's proprietary Baichuan talkback protocol,
+  # not RTSP. This app delegates the protocol session to reolink-cli.
+  # Install/configure the CLI and verify its exact device syntax for your
+  # installed version. Leave enabled false until tested with your NVR.
+  enabled: false
+  executable: "reolink-cli"
+  # The CLI's registered device/profile must already have NVR credentials.
+  # {channel} is zero-based, as required by the CLI's channel selector.
+  # Example syntax is based on the Reolink CLI documentation:
+  # ["reolink-cli", "--device", "my-nvr", "--channel", "{channel}",
+  #  "audio", "talk", "--stdin", "--sample-rate", "16000"]
+  command:
+    - "reolink-cli"
+    - "--device"
+    - "my-nvr"
+    - "--channel"
+    - "{channel}"
+    - "audio"
+    - "talk"
+    - "--stdin"
+    - "--sample-rate"
+    - "16000"
+  sample_rate: 16000
+  channels: 1
+  blocksize: 320
