@@ -90,6 +90,17 @@ class ReolinkAPI:
             })
         return channels
 
+    def get_spotlight(self, channel_index):
+        self._ensure_login()
+        item = self._post("GetWhiteLed", [{
+            "cmd": "GetWhiteLed", "action": 1,
+            "param": {"channel": channel_index}
+        }])
+        led = item.get("value", {}).get("WhiteLed")
+        if not led:
+            raise ReolinkAPIError("NVR did not return WhiteLed settings for this channel.")
+        return bool(int(led.get("state", 0)))
+
     def set_spotlight(self, channel_index, enabled):
         self._ensure_login()
         # Read current settings first so mode/brightness/schedule are preserved.
@@ -106,3 +117,7 @@ class ReolinkAPI:
             "param": {"WhiteLed": led}
         }]
         self._post("SetWhiteLed", payload)
+        # A successful SetWhiteLed response is the device's acknowledgement.
+        # Some NVR firmware returns stale GetWhiteLed settings immediately
+        # after a successful update, despite applying the change to the light.
+        return bool(enabled)

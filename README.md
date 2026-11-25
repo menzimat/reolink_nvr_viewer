@@ -55,6 +55,7 @@ Edit `config.yaml`:
 - `nvr.keepass_entry`: exact KeePassXC entry title containing the NVR password.
 - `nvr.keepass_group`: optional KeePassXC group path.
 - `video.stream`: `sub` is recommended for multiple panes; use `main` for quality.
+- `gui.dark_mode`: set to `true` to use the dark application color scheme.
 
 The NVR password is not stored in YAML. On launch, `keepassxc-cli` retrieves
 the password from the named KeePassXC entry. The KeePassXC CLI may prompt for
@@ -84,7 +85,8 @@ python main.py
 
 - `Channels` menu: show all, show online, or toggle individual channels.
 - `Layout` menu: choose 1–4 columns or save immediately.
-- Each camera pane has a Spotlight toggle.
+- Each camera pane has a Spotlight button that shows its confirmed ON/OFF state;
+  the button is yellow when ON.
 - If audio is enabled, hold `Hold to Talk` while speaking; release to stop.
 - Drag the splitters between panes to resize them horizontally and vertically.
   Pane dimensions, row/column ordering, visible channels, and main-window geometry are saved to
