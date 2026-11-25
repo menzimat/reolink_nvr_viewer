@@ -29,6 +29,18 @@ class CameraPane:
         name = app.channel_label(channel)
         self.name_label = ttk.Label(self.title, text=name, font=("", 10, "bold"))
         self.name_label.pack(side="left", padx=4)
+        self.channel_choices = {
+            f"{item['rtsp_channel']:02d} - {app.channel_label(item)}": item["index"]
+            for item in app.channels
+        }
+        self.channel_choice = tk.StringVar(value=app.channel_choice_label(channel))
+        self.channel_menu = ttk.Combobox(
+            self.title, textvariable=self.channel_choice,
+            values=list(self.channel_choices), state="readonly", width=22
+        )
+        self.channel_menu.configure(foreground="black")
+        self.channel_menu.pack(side="left", padx=4)
+        self.channel_menu.bind("<<ComboboxSelected>>", self._select_channel)
         self.status_label = ttk.Label(self.title, text="Starting")
         self.status_label.pack(side="left", padx=8)
         self.spotlight_button = ttk.Button(
@@ -56,6 +68,36 @@ class CameraPane:
         self.talkback = None
         threading.Thread(target=self._load_spotlight_state, daemon=True).start()
 
+    def _select_channel(self, _event=None):
+        index = self.channel_choices.get(self.channel_choice.get())
+        if index is not None and index != self.channel["index"]:
+            self.app.select_channel(self.channel["index"], index)
+
+    def set_channel(self, channel):
+        """Replace this pane's stream and controls without disturbing other panes."""
+        if self.talkback:
+            self.talk_stop()
+        self.stream.stop()
+        self.channel = channel
+        self.name_label.config(text=self.app.channel_label(channel))
+        self.channel_choice.set(self.app.channel_choice_label(channel))
+        self.status_label.config(text="Starting")
+        self.image_label.configure(image="", text="Connecting…")
+        self.image_label.image = None
+        self.spotlight_button.config(text="Spotlight OFF", style="TButton")
+        self.spotlight_button.state(["disabled"])
+        self.spotlight_on = False
+        self.stream = CameraStream(
+            channel, self.app.host, self.app.rtsp_port,
+            self.app.username, self.app.password,
+            stream=self.app.video_cfg.get("stream", "sub"),
+            reconnect_seconds=self.app.video_cfg.get("reconnect_seconds", 3),
+            open_timeout=self.app.video_cfg.get("open_timeout_seconds", 8),
+            max_fps=self.app.video_cfg.get("max_fps", 15)
+        )
+        self.stream.start()
+        threading.Thread(target=self._load_spotlight_state, daemon=True).start()
+
     def place(self, row, column):
         self.frame.grid(row=row, column=column, sticky="nsew", padx=3, pady=3)
 
@@ -71,12 +113,19 @@ class CameraPane:
         threading.Thread(target=work, daemon=True).start()
 
     def _load_spotlight_state(self):
+        channel_index = self.channel["index"]
         try:
-            enabled = self.app.api.get_spotlight(self.channel["index"])
+            enabled = self.app.api.get_spotlight(channel_index)
         except Exception:
-            self.app.after(0, lambda: self.spotlight_button.state(["!disabled"]))
+            self.app.after(0, lambda: (
+                self.spotlight_button.state(["!disabled"])
+                if self.channel["index"] == channel_index else None
+            ))
             return
-        self.app.after(0, lambda: self._set_spotlight_state(enabled))
+        self.app.after(0, lambda: (
+            self._set_spotlight_state(enabled)
+            if self.channel["index"] == channel_index else None
+        ))
 
     def _set_spotlight_state(self, enabled):
         self.spotlight_on = bool(enabled)
@@ -155,16 +204,24 @@ class ViewerApp(tk.Tk):
         self._configure_theme()
         self.pane_min_width = gui.get("pane_min_width", 240)
         self.pane_min_height = gui.get("pane_min_height", 160)
-        self.columns = max(1, int(gui.get("default_columns", 3)))
+        default_columns = max(1, int(gui.get("default_columns", 3)))
         self.title(gui.get("title", "Reolink NVR Viewer"))
         self.store = LayoutStore(gui["layout_file"])
         self.saved = self.store.load()
+        self.columns = max(1, int(self.saved.get("columns", default_columns)))
         self.geometry(self.saved.get("window_geometry", gui.get("geometry", "1400x900+80+60")))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.panes = {}
+        channel_indexes = {channel["index"] for channel in channels}
         self.visible = set(self.saved.get(
             "visible_channels", [c["index"] for c in channels if c["online"]]
-        ))
+        )) & channel_indexes
+        saved_order = self.saved.get("display_order", [])
+        self.display_order = [i for i in saved_order if i in self.visible]
+        self.display_order.extend(
+            c["index"] for c in channels
+            if c["index"] in self.visible and c["index"] not in self.display_order
+        )
         self._build_menu()
         # Nested Panedwindows provide real draggable splitters: horizontal
         # splitters within each row and vertical splitters between rows.
@@ -218,6 +275,9 @@ class ViewerApp(tk.Tk):
         custom = self.cfg.get("gui", {}).get("channel_names", {})
         return custom.get(str(channel["rtsp_channel"]), channel["name"])
 
+    def channel_choice_label(self, channel):
+        return f"{channel['rtsp_channel']:02d} - {self.channel_label(channel)}"
+
     def _build_menu(self):
         menu_options = getattr(self, "_menu_colors", {})
         bar = tk.Menu(self, **menu_options)
@@ -254,7 +314,7 @@ class ViewerApp(tk.Tk):
             child.destroy()
         self.pane_rows = []
 
-        selected = [c for c in self.channels if c["index"] in self.visible]
+        selected = [self.channel_by_index(i) for i in self.display_order]
         saved_panes = self.saved.get("panes", {})
         row_count = (len(selected) + self.columns - 1) // self.columns
 
@@ -273,31 +333,44 @@ class ViewerApp(tk.Tk):
 
         # Restore splitter coordinates only after Tk has assigned geometry.
         def restore_sashes():
+            saved_row_sashes = self.saved.get("row_sashes", [])
             for row_index, row_widget in enumerate(self.pane_rows):
                 row_channels = selected[
                     row_index * self.columns:(row_index + 1) * self.columns
                 ]
-                cumulative = 0
                 for sash_index, channel in enumerate(row_channels[:-1]):
-                    saved = saved_panes.get(str(channel["index"]), {})
-                    cumulative += int(saved.get("width", self.pane_min_width))
+                    if (row_index < len(saved_row_sashes)
+                            and sash_index < len(saved_row_sashes[row_index])):
+                        position = int(saved_row_sashes[row_index][sash_index])
+                    else:
+                        position = sum(
+                            int(saved_panes.get(str(item["index"]), {}).get(
+                                "width", self.pane_min_width
+                            )) for item in row_channels[:sash_index + 1]
+                        )
                     try:
-                        row_widget.sashpos(sash_index, cumulative)
+                        row_widget.sashpos(sash_index, position)
                     except tk.TclError:
                         pass
-            cumulative_height = 0
+            saved_vertical_sashes = self.saved.get("vertical_sashes", [])
             for sash_index, row_channels in enumerate([
                 selected[i * self.columns:(i + 1) * self.columns]
                 for i in range(row_count)
             ][:-1]):
-                row_heights = [
-                    int(saved_panes.get(str(c["index"]), {}).get(
-                        "height", self.pane_min_height
-                    )) for c in row_channels
-                ]
-                cumulative_height += max(row_heights or [self.pane_min_height])
+                if sash_index < len(saved_vertical_sashes):
+                    position = int(saved_vertical_sashes[sash_index])
+                else:
+                    prior_rows = [
+                        selected[i * self.columns:(i + 1) * self.columns]
+                        for i in range(sash_index + 1)
+                    ]
+                    position = sum(max([
+                        int(saved_panes.get(str(c["index"]), {}).get(
+                            "height", self.pane_min_height
+                        )) for c in row
+                    ] or [self.pane_min_height]) for row in prior_rows)
                 try:
-                    self.video_area.sashpos(sash_index, cumulative_height)
+                    self.video_area.sashpos(sash_index, position)
                 except tk.TclError:
                     pass
         self.after(250, restore_sashes)
@@ -305,18 +378,53 @@ class ViewerApp(tk.Tk):
     def toggle_channel(self, index):
         if index in self.visible:
             self.visible.remove(index)
+            self.display_order.remove(index)
         else:
             self.visible.add(index)
+            self.display_order.append(index)
         self._rebuild_panes()
+
+    def channel_by_index(self, index):
+        return next(channel for channel in self.channels if channel["index"] == index)
+
+    def select_channel(self, current_index, selected_index):
+        """Change only the pane(s) whose displayed channel assignments change."""
+        current_pane = self.panes[current_index]
+        current_channel = self.channel_by_index(current_index)
+        if selected_index in self.visible:
+            selected_pane = self.panes[selected_index]
+            selected_channel = self.channel_by_index(selected_index)
+            current_pane.set_channel(selected_channel)
+            selected_pane.set_channel(current_channel)
+            self.panes[current_index], self.panes[selected_index] = (
+                selected_pane, current_pane
+            )
+            current_position = self.display_order.index(current_index)
+            selected_position = self.display_order.index(selected_index)
+            self.display_order[current_position], self.display_order[selected_position] = (
+                self.display_order[selected_position], self.display_order[current_position]
+            )
+        else:
+            current_pane.set_channel(self.channel_by_index(selected_index))
+            self.panes.pop(current_index)
+            self.panes[selected_index] = current_pane
+            position = self.display_order.index(current_index)
+            self.display_order[position] = selected_index
+            self.visible.remove(current_index)
+            self.visible.add(selected_index)
+            for channel_index, var in self.channel_vars.items():
+                var.set(channel_index in self.visible)
 
     def show_all(self):
         self.visible = {c["index"] for c in self.channels}
+        self.display_order = [c["index"] for c in self.channels]
         for index, var in self.channel_vars.items():
             var.set(index in self.visible)
         self._rebuild_panes()
 
     def show_online(self):
         self.visible = {c["index"] for c in self.channels if c["online"]}
+        self.display_order = [c["index"] for c in self.channels if c["online"]]
         for index, var in self.channel_vars.items():
             var.set(index in self.visible)
         self._rebuild_panes()
@@ -324,6 +432,8 @@ class ViewerApp(tk.Tk):
     def set_columns(self, count):
         self.columns = count
         self.saved["panes"] = {}
+        self.saved["row_sashes"] = []
+        self.saved["vertical_sashes"] = []
         self._rebuild_panes()
 
     def _refresh(self):
@@ -333,19 +443,32 @@ class ViewerApp(tk.Tk):
 
     def save_layout(self):
         panes = {}
-        for position, channel in enumerate(
-            c for c in self.channels if c["index"] in self.visible
-        ):
+        for position, channel in enumerate(self.channel_by_index(i) for i in self.display_order):
             geometry = self.panes[channel["index"]].save_geometry()
             geometry["row"] = position // self.columns
             geometry["column"] = position % self.columns
             panes[str(channel["index"])] = geometry
-        self.store.save({
+        row_sashes = []
+        for row_widget in self.pane_rows:
+            row_sashes.append([
+                row_widget.sashpos(index)
+                for index in range(max(0, len(row_widget.panes()) - 1))
+            ])
+        vertical_sashes = [
+            self.video_area.sashpos(index)
+            for index in range(max(0, len(self.video_area.panes()) - 1))
+        ]
+        layout = {
             "window_geometry": self.geometry(),
             "visible_channels": sorted(self.visible),
+            "display_order": list(self.display_order),
             "columns": self.columns,
-            "panes": panes
-        })
+            "panes": panes,
+            "row_sashes": row_sashes,
+            "vertical_sashes": vertical_sashes
+        }
+        self.store.save(layout)
+        self.saved = layout
         self.status.config(text="Layout saved")
 
     def on_close(self):
