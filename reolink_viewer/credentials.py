@@ -20,14 +20,14 @@ def get_keepass_password(database, entry, group=""):
     try:
         # stdin remains attached to the terminal so keepassxc-cli can prompt.
         result = subprocess.run(
-            cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            check=False
+            cmd, text=True, stdout=subprocess.PIPE, check=False
         )
     except OSError as exc:
         raise CredentialError(f"Could not run keepassxc-cli: {exc}") from exc
     if result.returncode != 0:
-        detail = result.stderr.strip() or "KeePassXC returned an error."
-        raise CredentialError(detail)
+        raise CredentialError(
+            "KeePassXC could not retrieve the configured entry; see the terminal output."
+        )
     password = result.stdout.rstrip("\r\n")
     if not password:
         raise CredentialError("The KeePassXC entry returned an empty password.")

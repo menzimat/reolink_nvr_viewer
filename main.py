@@ -17,6 +17,8 @@ def main():
     try:
         cfg = load_config(args.config)
         nvr = cfg["nvr"]
+        print("Checking KeePass database; enter its master password in the terminal if prompted.",
+              file=sys.stderr, flush=True)
         password = get_keepass_password(
             nvr["keepass_database"], nvr["keepass_entry"],
             nvr.get("keepass_group", "")
