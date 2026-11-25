@@ -24,6 +24,8 @@ gui:
   title: "Reolink NVR Viewer"
   geometry: "1400x900+80+60"
   default_columns: 3
+  # Use a dark color scheme for the application window and controls.
+  dark_mode: false
   pane_min_width: 240
   pane_min_height: 160
   layout_file: "~/.config/reolink-nvr-viewer/layout.json"

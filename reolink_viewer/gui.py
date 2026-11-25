@@ -31,7 +31,11 @@ class CameraPane:
         self.name_label.pack(side="left", padx=4)
         self.status_label = ttk.Label(self.title, text="Starting")
         self.status_label.pack(side="left", padx=8)
-        ttk.Button(self.title, text="Spotlight", command=self.toggle_spotlight).pack(side="right")
+        self.spotlight_button = ttk.Button(
+            self.title, text="Spotlight OFF", command=self.toggle_spotlight
+        )
+        self.spotlight_button.state(["disabled"])
+        self.spotlight_button.pack(side="right")
         if app.audio_enabled:
             self.talk_button = ttk.Button(self.title, text="Hold to Talk")
             self.talk_button.pack(side="right", padx=3)
@@ -50,22 +54,41 @@ class CameraPane:
         self.stream.start()
         self.spotlight_on = False
         self.talkback = None
+        threading.Thread(target=self._load_spotlight_state, daemon=True).start()
 
     def place(self, row, column):
         self.frame.grid(row=row, column=column, sticky="nsew", padx=3, pady=3)
 
     def toggle_spotlight(self):
         enabled = not self.spotlight_on
+        self.spotlight_button.state(["disabled"])
         def work():
             try:
-                self.app.api.set_spotlight(self.channel["index"], enabled)
-                self.spotlight_on = enabled
-                self.app.after(0, lambda: self.status_label.config(
-                    text=f"{self.stream.status} | Light {'ON' if enabled else 'OFF'}"
-                ))
+                confirmed = self.app.api.set_spotlight(self.channel["index"], enabled)
+                self.app.after(0, lambda: self._set_spotlight_state(confirmed))
             except Exception as exc:
-                self.app.after(0, lambda: messagebox.showerror("Spotlight error", str(exc)))
+                self.app.after(0, lambda error=exc: self._spotlight_failed(error))
         threading.Thread(target=work, daemon=True).start()
+
+    def _load_spotlight_state(self):
+        try:
+            enabled = self.app.api.get_spotlight(self.channel["index"])
+        except Exception:
+            self.app.after(0, lambda: self.spotlight_button.state(["!disabled"]))
+            return
+        self.app.after(0, lambda: self._set_spotlight_state(enabled))
+
+    def _set_spotlight_state(self, enabled):
+        self.spotlight_on = bool(enabled)
+        self.spotlight_button.config(
+            text=f"Spotlight {'ON' if self.spotlight_on else 'OFF'}",
+            style="SpotlightOn.TButton" if self.spotlight_on else "TButton"
+        )
+        self.spotlight_button.state(["!disabled"])
+
+    def _spotlight_failed(self, exc):
+        self.spotlight_button.state(["!disabled"])
+        messagebox.showerror("Spotlight error", str(exc))
 
     def talk_start(self, _event=None):
         try:
@@ -128,6 +151,8 @@ class ViewerApp(tk.Tk):
         self.audio_cfg = cfg.get("audio", {})
         self.audio_enabled = bool(self.audio_cfg.get("enabled", False))
         gui = cfg.get("gui", {})
+        self.dark_mode = bool(gui.get("dark_mode", False))
+        self._configure_theme()
         self.pane_min_width = gui.get("pane_min_width", 240)
         self.pane_min_height = gui.get("pane_min_height", 160)
         self.columns = max(1, int(gui.get("default_columns", 3)))
@@ -151,13 +176,52 @@ class ViewerApp(tk.Tk):
         self._rebuild_panes()
         self.after(100, self._refresh)
 
+    def _configure_theme(self):
+        """Configure ttk colors and optionally apply the dark palette."""
+        style = ttk.Style(self)
+        # Native ttk themes often ignore per-button background colors. Clam
+        # honors the custom yellow Spotlight ON style on all platforms.
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "SpotlightOn.TButton", background="#ffd54f", foreground="#202124"
+        )
+        style.map("SpotlightOn.TButton", background=[("active", "#ffca28")])
+        if not self.dark_mode:
+            return
+        palette = {
+            "background": "#202124",
+            "surface": "#292a2d",
+            "foreground": "#e8eaed",
+            "muted": "#bdc1c6",
+            "border": "#5f6368",
+        }
+        self.configure(background=palette["background"])
+        style.configure(".", background=palette["surface"], foreground=palette["foreground"])
+        style.configure("TFrame", background=palette["surface"])
+        style.configure("TPanedwindow", background=palette["background"])
+        style.configure("TLabel", background=palette["surface"], foreground=palette["foreground"])
+        style.configure("TButton", background=palette["surface"], foreground=palette["foreground"])
+        style.map(
+            "TButton",
+            background=[("disabled", palette["surface"]), ("active", palette["border"])],
+            foreground=[("disabled", palette["muted"])],
+        )
+        self._menu_colors = {
+            "background": palette["surface"], "foreground": palette["foreground"],
+            "activebackground": palette["border"], "activeforeground": palette["foreground"],
+        }
+
     def channel_label(self, channel):
         custom = self.cfg.get("gui", {}).get("channel_names", {})
         return custom.get(str(channel["rtsp_channel"]), channel["name"])
 
     def _build_menu(self):
-        bar = tk.Menu(self)
-        channels_menu = tk.Menu(bar, tearoff=False)
+        menu_options = getattr(self, "_menu_colors", {})
+        bar = tk.Menu(self, **menu_options)
+        channels_menu = tk.Menu(bar, tearoff=False, **menu_options)
         channels_menu.add_command(label="Show All", command=self.show_all)
         channels_menu.add_command(label="Show Online", command=self.show_online)
         channels_menu.add_separator()
@@ -171,7 +235,7 @@ class ViewerApp(tk.Tk):
                 command=lambda c=channel: self.toggle_channel(c["index"])
             )
         bar.add_cascade(label="Channels", menu=channels_menu)
-        layout_menu = tk.Menu(bar, tearoff=False)
+        layout_menu = tk.Menu(bar, tearoff=False, **menu_options)
         for count in (1, 2, 3, 4):
             layout_menu.add_command(
                 label=f"{count} column(s)",

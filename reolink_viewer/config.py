@@ -15,6 +15,7 @@ def load_config(path="config.yaml"):
     cfg.setdefault("video", {})
     cfg.setdefault("gui", {})
     cfg.setdefault("audio", {})
+    cfg["gui"].setdefault("dark_mode", False)
     cfg["gui"]["layout_file"] = str(Path(
         cfg["gui"].get("layout_file", "~/.config/reolink-nvr-viewer/layout.json")
     ).expanduser())
