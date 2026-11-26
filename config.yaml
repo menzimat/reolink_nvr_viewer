@@ -32,6 +32,26 @@ gui:
   # Optional channel display names keyed by 1-based NVR channel number.
   channel_names:
     "0": "None"
+  excluded_channels: [10, 11, 12]
+  channels:
+    "1":
+      streams: [sub]
+    "2":
+      streams: [sub]
+    "3":
+      streams: [sub]
+    "4":
+      streams: [sub]
+    "5":
+      streams: [sub]
+    "6":
+      streams: [sub]
+    "7":
+      streams: [sub]
+    "8":
+      streams: [sub]
+    "9":
+      streams: [sub]
 
 audio:
   # Two-way talk uses Reolink's proprietary Baichuan talkback protocol,

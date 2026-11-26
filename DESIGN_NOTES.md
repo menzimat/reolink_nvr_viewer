@@ -39,7 +39,10 @@ mouse button is released or the pane closes.
 
 Reolink CGI channel indexes are zero-based. RTSP path channel identifiers are
 one-based and two-digit padded. `channel["index"]` is used for CGI and
-`channel["rtsp_channel"]` for RTSP. Do not conflate them when adding controls.
+`channel["rtsp_channel"]` for RTSP. User config `excluded_channels` and
+`channels` keys use one-based RTSP channel numbers. Pane/layout identifiers
+combine the internal index and stream name so one camera can have main and sub
+panes simultaneously.
 
 ## Video design
 
@@ -59,7 +62,7 @@ they contain credentials.
 `LayoutStore` writes JSON atomically through a temporary file and rename.
 Saved state includes:
 - Tk main-window geometry string;
-- selected channel indexes;
+- visible pane identities and order (channel index plus stream type);
 - each pane's row, column, width, and height;
 - chosen number of columns.
 

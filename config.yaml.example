@@ -29,6 +29,13 @@ gui:
   pane_min_width: 240
   pane_min_height: 160
   layout_file: "~/.config/reolink-nvr-viewer/layout.json"
+  # Channel numbers below are 1-based NVR channel numbers.
+  # Excluded channels are not offered in the menu and never open RTSP streams.
+  excluded_channels: []
+  # Add or select stream panes per channel. Omitted channels use video.stream.
+  channels:
+    # "9":
+    #   streams: [main, sub]
   # Optional channel display names keyed by 1-based NVR channel number.
   channel_names:
     "1": "Front"

@@ -14,9 +14,10 @@ from .layout import LayoutStore
 from .talkback import Talkback
 
 class CameraPane:
-    def __init__(self, app, channel, saved=None, parent=None):
+    def __init__(self, app, channel, stream_type, saved=None, parent=None):
         self.app = app
         self.channel = channel
+        self.stream_type = stream_type
         self.saved = saved or {}
         self.frame = ttk.Frame(parent or app.video_area, relief="groove", borderwidth=2)
         self.frame.grid_propagate(False)
@@ -26,12 +27,12 @@ class CameraPane:
         )
         self.title = ttk.Frame(self.frame)
         self.title.pack(fill="x")
-        name = app.channel_label(channel)
+        name = f"{app.channel_label(channel)} ({stream_type})"
         self.name_label = ttk.Label(self.title, text=name, font=("", 10, "bold"))
         self.name_label.pack(side="left", padx=4)
         self.channel_choices = {
             f"{item['rtsp_channel']:02d} - {app.channel_label(item)}": item["index"]
-            for item in app.channels
+            for item in app.channels if self.stream_type in app.channel_streams(item)
         }
         self.channel_choice = tk.StringVar(value=app.channel_choice_label(channel))
         self.channel_menu = ttk.Combobox(
@@ -58,7 +59,7 @@ class CameraPane:
         self.image_label.pack(fill="both", expand=True)
         self.stream = CameraStream(
             channel, app.host, app.rtsp_port, app.username, app.password,
-            stream=app.video_cfg.get("stream", "sub"),
+            stream=stream_type,
             reconnect_seconds=app.video_cfg.get("reconnect_seconds", 3),
             open_timeout=app.video_cfg.get("open_timeout_seconds", 8),
             max_fps=app.video_cfg.get("max_fps", 15)
@@ -71,7 +72,11 @@ class CameraPane:
     def _select_channel(self, _event=None):
         index = self.channel_choices.get(self.channel_choice.get())
         if index is not None and index != self.channel["index"]:
-            self.app.select_channel(self.channel["index"], index)
+            self.app.select_channel(self.key, index, self.stream_type)
+
+    @property
+    def key(self):
+        return self.app.pane_key(self.channel["index"], self.stream_type)
 
     def set_channel(self, channel):
         """Replace this pane's stream and controls without disturbing other panes."""
@@ -79,7 +84,7 @@ class CameraPane:
             self.talk_stop()
         self.stream.stop()
         self.channel = channel
-        self.name_label.config(text=self.app.channel_label(channel))
+        self.name_label.config(text=f"{self.app.channel_label(channel)} ({self.stream_type})")
         self.channel_choice.set(self.app.channel_choice_label(channel))
         self.status_label.config(text="Starting")
         self.image_label.configure(image="", text="Connecting…")
@@ -90,7 +95,7 @@ class CameraPane:
         self.stream = CameraStream(
             channel, self.app.host, self.app.rtsp_port,
             self.app.username, self.app.password,
-            stream=self.app.video_cfg.get("stream", "sub"),
+            stream=self.stream_type,
             reconnect_seconds=self.app.video_cfg.get("reconnect_seconds", 3),
             open_timeout=self.app.video_cfg.get("open_timeout_seconds", 8),
             max_fps=self.app.video_cfg.get("max_fps", 15)
@@ -192,7 +197,7 @@ class CameraPane:
 class ViewerApp(tk.Tk):
     def __init__(self, cfg, api, channels, username, password):
         super().__init__()
-        self.cfg, self.api, self.channels = cfg, api, channels
+        self.cfg, self.api = cfg, api
         self.username, self.password = username, password
         self.host = cfg["nvr"]["host"]
         self.rtsp_port = cfg["nvr"].get("rtsp_port", 554)
@@ -200,6 +205,11 @@ class ViewerApp(tk.Tk):
         self.audio_cfg = cfg.get("audio", {})
         self.audio_enabled = bool(self.audio_cfg.get("enabled", False))
         gui = cfg.get("gui", {})
+        excluded = {int(n) for n in gui.get("excluded_channels", [])}
+        self.channels = [c for c in channels if c["rtsp_channel"] not in excluded]
+        self.channel_config = {
+            int(number): value for number, value in gui.get("channels", {}).items()
+        }
         self.dark_mode = bool(gui.get("dark_mode", False))
         self._configure_theme()
         self.pane_min_width = gui.get("pane_min_width", 240)
@@ -212,23 +222,63 @@ class ViewerApp(tk.Tk):
         self.geometry(self.saved.get("window_geometry", gui.get("geometry", "1400x900+80+60")))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.panes = {}
-        channel_indexes = {channel["index"] for channel in channels}
-        self.visible = set(self.saved.get(
-            "visible_channels", [c["index"] for c in channels if c["online"]]
-        )) & channel_indexes
-        saved_order = self.saved.get("display_order", [])
-        self.display_order = [i for i in saved_order if i in self.visible]
-        self.display_order.extend(
-            c["index"] for c in channels
-            if c["index"] in self.visible and c["index"] not in self.display_order
+        self.channel_indexes = {c["index"] for c in self.channels}
+        self.stream_specs = [
+            (c["index"], stream) for c in self.channels
+            for stream in self.channel_streams(c)
+        ]
+        valid_keys = {self.pane_key(*spec) for spec in self.stream_specs}
+        self.saved["panes"] = self._normalize_saved_panes(
+            self.saved.get("panes", {}), valid_keys
         )
+        default_visible = [self.pane_key(c["index"], s)
+                           for c in self.channels if c["online"]
+                           for s in self.channel_streams(c)]
+        # Read current format and migrate older channel-only layout files.
+        saved_visible = self.saved.get("visible_panes")
+        if saved_visible is None:
+            legacy = set(self.saved.get("visible_channels", [
+                c["index"] for c in self.channels if c["online"]
+            ]))
+            saved_visible = [self.pane_key(i, s) for i, s in self.stream_specs
+                             if i in legacy]
+        else:
+            saved_visible = [self._normalize_saved_key(key, valid_keys)
+                             for key in saved_visible]
+            saved_visible = list(dict.fromkeys(
+                key for key in saved_visible if key is not None
+            ))
+            saved_set = set(saved_visible)
+            # Newly configured stream panes join channels already visible in
+            # an older saved layout, without resetting the user's selection.
+            for channel in self.channels:
+                channel_keys = [self.pane_key(channel["index"], s)
+                                for s in self.channel_streams(channel)]
+                if any(key in saved_set for key in channel_keys):
+                    saved_visible.extend(key for key in channel_keys if key not in saved_set)
+                    saved_set.update(channel_keys)
+        self.visible = set(saved_visible) & valid_keys
+        saved_order = self.saved.get("display_order_panes")
+        if saved_order is None:
+            legacy_order = self.saved.get("display_order", [])
+            saved_order = [self.pane_key(i, s) for i in legacy_order
+                           for ci, s in self.stream_specs if ci == i]
+        else:
+            saved_order = [self._normalize_saved_key(key, valid_keys)
+                           for key in saved_order]
+            saved_order = list(dict.fromkeys(
+                key for key in saved_order if key is not None
+            ))
+        self.display_order = [k for k in saved_order if k in self.visible]
+        self.display_order.extend(k for k in default_visible
+                                  if k in self.visible and k not in self.display_order)
         self._build_menu()
         # Nested Panedwindows provide real draggable splitters: horizontal
         # splitters within each row and vertical splitters between rows.
         self.video_area = ttk.Panedwindow(self, orient=tk.VERTICAL)
         self.video_area.pack(fill="both", expand=True)
         self.pane_rows = []
-        self.status = ttk.Label(self, text=f"Found {len(channels)} NVR channels")
+        self.status = ttk.Label(self, text=f"Found {len(self.channels)} available NVR channels")
         self.status.pack(fill="x", side="bottom")
         self._rebuild_panes()
         self.after(100, self._refresh)
@@ -275,6 +325,46 @@ class ViewerApp(tk.Tk):
         custom = self.cfg.get("gui", {}).get("channel_names", {})
         return custom.get(str(channel["rtsp_channel"]), channel["name"])
 
+    def pane_key(self, index, stream):
+        return f"{index}:{stream}"
+
+    def _normalize_saved_key(self, key, valid_keys):
+        """Keep saved panes when a channel's configured stream type changed."""
+        if not isinstance(key, str):
+            return None
+        if key in valid_keys:
+            return key
+        try:
+            index_text, _old_stream = key.split(":", 1)
+            index = int(index_text)
+        except (ValueError, TypeError):
+            return None
+        channel = next((c for c in self.channels if c["index"] == index), None)
+        if channel is None:
+            return None
+        options = self.channel_streams(channel)
+        preferred = self.video_cfg.get("stream", "sub")
+        stream = preferred if preferred in options else options[0]
+        return self.pane_key(index, stream)
+
+    def _normalize_saved_panes(self, panes, valid_keys):
+        """Migrate pane geometry from old stream-specific keys when possible."""
+        if not isinstance(panes, dict):
+            return {}
+        normalized = {key: value for key, value in panes.items()
+                      if key in valid_keys}
+        for key, value in panes.items():
+            target = self._normalize_saved_key(key, valid_keys)
+            if target is not None and target not in normalized:
+                normalized[target] = value
+        return normalized
+
+    def channel_streams(self, channel):
+        setting = self.channel_config.get(channel["rtsp_channel"], {})
+        streams = setting.get("streams") if isinstance(setting, dict) else None
+        streams = streams or [self.video_cfg.get("stream", "sub")]
+        return list(dict.fromkeys(s for s in streams if s in ("main", "sub"))) or ["sub"]
+
     def channel_choice_label(self, channel):
         return f"{channel['rtsp_channel']:02d} - {self.channel_label(channel)}"
 
@@ -287,7 +377,8 @@ class ViewerApp(tk.Tk):
         channels_menu.add_separator()
         self.channel_vars = {}
         for channel in self.channels:
-            var = tk.BooleanVar(value=channel["index"] in self.visible)
+            var = tk.BooleanVar(value=any(self.pane_key(channel["index"], s) in self.visible
+                                          for s in self.channel_streams(channel)))
             self.channel_vars[channel["index"]] = var
             channels_menu.add_checkbutton(
                 label=f"{channel['rtsp_channel']:02d} - {self.channel_label(channel)}",
@@ -314,7 +405,8 @@ class ViewerApp(tk.Tk):
             child.destroy()
         self.pane_rows = []
 
-        selected = [self.channel_by_index(i) for i in self.display_order]
+        selected = [(self.channel_by_index(int(k.split(":", 1)[0])), k.split(":", 1)[1])
+                    for k in self.display_order]
         saved_panes = self.saved.get("panes", {})
         row_count = (len(selected) + self.columns - 1) // self.columns
 
@@ -322,38 +414,38 @@ class ViewerApp(tk.Tk):
             row_widget = ttk.Panedwindow(self.video_area, orient=tk.HORIZONTAL)
             self.video_area.add(row_widget, weight=1)
             self.pane_rows.append(row_widget)
-            row_channels = selected[
+            row_specs = selected[
                 row_index * self.columns:(row_index + 1) * self.columns
             ]
-            for col_index, channel in enumerate(row_channels):
-                key = str(channel["index"])
-                pane = CameraPane(self, channel, saved_panes.get(key, {}), parent=row_widget)
-                self.panes[channel["index"]] = pane
+            for col_index, (channel, stream) in enumerate(row_specs):
+                key = self.pane_key(channel["index"], stream)
+                pane = CameraPane(self, channel, stream, saved_panes.get(key, {}), parent=row_widget)
+                self.panes[key] = pane
                 row_widget.add(pane.frame, weight=1)
 
         # Restore splitter coordinates only after Tk has assigned geometry.
         def restore_sashes():
             saved_row_sashes = self.saved.get("row_sashes", [])
             for row_index, row_widget in enumerate(self.pane_rows):
-                row_channels = selected[
+                row_specs = selected[
                     row_index * self.columns:(row_index + 1) * self.columns
                 ]
-                for sash_index, channel in enumerate(row_channels[:-1]):
+                for sash_index, (channel, stream) in enumerate(row_specs[:-1]):
                     if (row_index < len(saved_row_sashes)
                             and sash_index < len(saved_row_sashes[row_index])):
                         position = int(saved_row_sashes[row_index][sash_index])
                     else:
                         position = sum(
-                            int(saved_panes.get(str(item["index"]), {}).get(
+                            int(saved_panes.get(self.pane_key(item[0]["index"], item[1]), {}).get(
                                 "width", self.pane_min_width
-                            )) for item in row_channels[:sash_index + 1]
+                            )) for item in row_specs[:sash_index + 1]
                         )
                     try:
                         row_widget.sashpos(sash_index, position)
                     except tk.TclError:
                         pass
             saved_vertical_sashes = self.saved.get("vertical_sashes", [])
-            for sash_index, row_channels in enumerate([
+            for sash_index, row_specs in enumerate([
                 selected[i * self.columns:(i + 1) * self.columns]
                 for i in range(row_count)
             ][:-1]):
@@ -365,10 +457,10 @@ class ViewerApp(tk.Tk):
                         for i in range(sash_index + 1)
                     ]
                     position = sum(max([
-                        int(saved_panes.get(str(c["index"]), {}).get(
+                        int(saved_panes.get(self.pane_key(c[0]["index"], c[1]), {}).get(
                             "height", self.pane_min_height
-                        )) for c in row
-                    ] or [self.pane_min_height]) for row in prior_rows)
+                        )) for c in prior_row
+                    ] or [self.pane_min_height]) for prior_row in prior_rows)
                 try:
                     self.video_area.sashpos(sash_index, position)
                 except tk.TclError:
@@ -376,57 +468,68 @@ class ViewerApp(tk.Tk):
         self.after(250, restore_sashes)
 
     def toggle_channel(self, index):
-        if index in self.visible:
-            self.visible.remove(index)
-            self.display_order.remove(index)
+        keys = [self.pane_key(index, s) for s in self.channel_streams(self.channel_by_index(index))]
+        if any(key in self.visible for key in keys):
+            self.visible.difference_update(keys)
+            self.display_order = [key for key in self.display_order if key not in keys]
         else:
-            self.visible.add(index)
-            self.display_order.append(index)
+            self.visible.update(keys)
+            self.display_order.extend(key for key in keys if key not in self.display_order)
         self._rebuild_panes()
 
     def channel_by_index(self, index):
         return next(channel for channel in self.channels if channel["index"] == index)
 
-    def select_channel(self, current_index, selected_index):
-        """Change only the pane(s) whose displayed channel assignments change."""
-        current_pane = self.panes[current_index]
-        current_channel = self.channel_by_index(current_index)
-        if selected_index in self.visible:
-            selected_pane = self.panes[selected_index]
-            selected_channel = self.channel_by_index(selected_index)
+    def select_channel(self, current_key, selected_index, stream):
+        new_key = self.pane_key(selected_index, stream)
+        if current_key not in self.panes or current_key == new_key:
+            return
+        current_pane = self.panes[current_key]
+        affected_indexes = {current_pane.channel["index"], selected_index}
+        if new_key in self.visible:
+            other_pane = self.panes[new_key]
+            current_channel = current_pane.channel
+            selected_channel = other_pane.channel
+            # Preserve the two widget trees and their splitter positions;
+            # only restart the streams in the panes whose assignments changed.
             current_pane.set_channel(selected_channel)
-            selected_pane.set_channel(current_channel)
-            self.panes[current_index], self.panes[selected_index] = (
-                selected_pane, current_pane
+            other_pane.set_channel(current_channel)
+            old_position = self.display_order.index(current_key)
+            other_position = self.display_order.index(new_key)
+            self.display_order[old_position], self.display_order[other_position] = (
+                new_key, current_key
             )
-            current_position = self.display_order.index(current_index)
-            selected_position = self.display_order.index(selected_index)
-            self.display_order[current_position], self.display_order[selected_position] = (
-                self.display_order[selected_position], self.display_order[current_position]
-            )
+            self.panes[current_key], self.panes[new_key] = other_pane, current_pane
         else:
-            current_pane.set_channel(self.channel_by_index(selected_index))
-            self.panes.pop(current_index)
-            self.panes[selected_index] = current_pane
-            position = self.display_order.index(current_index)
-            self.display_order[position] = selected_index
-            self.visible.remove(current_index)
-            self.visible.add(selected_index)
-            for channel_index, var in self.channel_vars.items():
-                var.set(channel_index in self.visible)
+            channel = self.channel_by_index(selected_index)
+            current_pane.set_channel(channel)
+            position = self.display_order.index(current_key)
+            self.display_order[position] = new_key
+            self.visible.discard(current_key)
+            self.visible.add(new_key)
+            self.panes.pop(current_key)
+            self.panes[new_key] = current_pane
+        for index in affected_indexes:
+            var = self.channel_vars.get(index)
+            if var is not None:
+                var.set(any(self.pane_key(index, s) in self.visible
+                            for s in self.channel_streams(self.channel_by_index(index))))
 
     def show_all(self):
-        self.visible = {c["index"] for c in self.channels}
-        self.display_order = [c["index"] for c in self.channels]
+        self.display_order = [self.pane_key(i, s) for i, s in self.stream_specs]
+        self.visible = set(self.display_order)
         for index, var in self.channel_vars.items():
-            var.set(index in self.visible)
+            var.set(any(self.pane_key(index, s) in self.visible
+                        for s in self.channel_streams(self.channel_by_index(index))))
         self._rebuild_panes()
 
     def show_online(self):
-        self.visible = {c["index"] for c in self.channels if c["online"]}
-        self.display_order = [c["index"] for c in self.channels if c["online"]]
+        self.display_order = [self.pane_key(c["index"], s) for c in self.channels if c["online"]
+                              for s in self.channel_streams(c)]
+        self.visible = set(self.display_order)
         for index, var in self.channel_vars.items():
-            var.set(index in self.visible)
+            var.set(any(self.pane_key(index, s) in self.visible
+                        for s in self.channel_streams(self.channel_by_index(index))))
         self._rebuild_panes()
 
     def set_columns(self, count):
@@ -443,11 +546,11 @@ class ViewerApp(tk.Tk):
 
     def save_layout(self):
         panes = {}
-        for position, channel in enumerate(self.channel_by_index(i) for i in self.display_order):
-            geometry = self.panes[channel["index"]].save_geometry()
+        for position, key in enumerate(self.display_order):
+            geometry = self.panes[key].save_geometry()
             geometry["row"] = position // self.columns
             geometry["column"] = position % self.columns
-            panes[str(channel["index"])] = geometry
+            panes[key] = geometry
         row_sashes = []
         for row_widget in self.pane_rows:
             row_sashes.append([
@@ -460,8 +563,8 @@ class ViewerApp(tk.Tk):
         ]
         layout = {
             "window_geometry": self.geometry(),
-            "visible_channels": sorted(self.visible),
-            "display_order": list(self.display_order),
+            "visible_panes": [key for key in self.display_order if key in self.visible],
+            "display_order_panes": list(self.display_order),
             "columns": self.columns,
             "panes": panes,
             "row_sashes": row_sashes,
