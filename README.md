@@ -55,6 +55,11 @@ Edit `config.yaml`:
 - `nvr.keepass_entry`: exact KeePassXC entry title containing the NVR password.
 - `nvr.keepass_group`: optional KeePassXC group path.
 - `video.stream`: `sub` is recommended for multiple panes; use `main` for quality.
+- `gui.excluded_channels`: optional list of 1-based NVR channel numbers to
+  omit from the channel menu and RTSP loading.
+- `gui.channels`: optional per-channel `streams` list, keyed by 1-based NVR
+  channel number. For example, `"9": {streams: [main, sub]}` opens both RTSP
+  streams as separate panes. Channels without an entry use `video.stream`.
 - `gui.dark_mode`: set to `true` to use the dark application color scheme.
 
 The NVR password is not stored in YAML. On launch, `keepassxc-cli` retrieves
@@ -90,7 +95,8 @@ python main.py
 - If audio is enabled, hold `Hold to Talk` while speaking; release to stop.
 - Drag the splitters between panes to resize them horizontally and vertically.
   Pane dimensions, row/column ordering, visible channels, and main-window geometry are saved to
-  `~/.config/reolink-nvr-viewer/layout.json`.
+  `~/.config/reolink-nvr-viewer/layout.json`. Each channel/stream pane is saved
+  independently, so additional stream panes restore with their own geometry.
 
 ## Known limitations / next refinements
 
